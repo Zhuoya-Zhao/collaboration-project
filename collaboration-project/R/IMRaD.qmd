@@ -1,0 +1,191 @@
+---
+title: "Report - Predictive model of gene expression"
+author: "Zhuoya Zhao"
+date: today
+format: 
+  html: 
+    self-contained: true
+    df-print: tibble
+editor_options: 
+  chunk_output_type: console
+execute: 
+  warning: false
+  message: false
+  echo: true
+---
+
+## Introduction
+
+This report describes the fitting of a predictive model of gene expression. The dataset used is from an experiment investigating the effect of a new treatment on gene expression. The variables and descriptions are as follows:
+
+| variable        | class     | description                                                     |
+|----------------|----------------|-----------------------------------------|
+| cell_line       | character | Cell lines, including 2 levels, wild type and cell type 101     |
+| treatment       | character | Treatment, including 2 levels, placebo and activating factor 42 |
+| name            | character | Name of cell                                                    |
+| conc            | double    | Concentration of treatment                                      |
+| gene_expression | double    | Gene expression                                                 |
+
+: Table 1: Description of the dataset
+
+## Method
+
+This section describes the method for exploring a suitable predictive model for gene expression using R programming.
+
+First, we clean the raw data by converting the character variables in the dataset to lowercase to address the inconsistencies between uppercase and lowercase letters.
+
+Second, we set up a validation split based on the stratification variable `gene_expression`, using a seed of 2024. We then create a 10-fold cross-validation set on the training set.
+
+Third, we create the workflow. In the recipe, we convert all character variables to factor variables. For the model, we perform lasso regression with `mixture = 1` using the `glmnet` engine. We set `penalty = tune()` to tune the regularisation parameter, and generate a grid of evenly spaced parameter values using `grid_regular()`, with 50 levels for one parameter in the grid. We use `autoplot()` to visualize the performance metrics versus the amount of regularisation.
+
+Fourth, we specify RMSE as the assessment metric and select the best regularisation amount with the smallest RMSE using `select_best()`. This allows us to update the final workflow by replacing the `penalty()` with the selected best value. At this point, we obtain the best predictive model.
+
+Fifth, we fit the final model on the entire dataset and produce a Variable Importance Plot (VIP) to identify the most influential variables in the model's prediction.
+
+Finally, we plot the trend of coefficients as the penalty varies.
+
+```{r}
+#| echo: false
+pacman::p_load(tidyverse, tidymodels, textrecipes, readxl, ggplot2)
+```
+
+```{r}
+#| echo: false
+df = read_xlsx(path = here::here("raw-data","WIF-tis4d.xlsx"), na ="") # load data
+```
+
+```{r}
+#| echo: false
+df = df |>
+  mutate(across(where(is.character), tolower)) # clean data
+```
+
+```{r}
+#| echo: false
+set.seed(2024)
+split = initial_split(df, strata = "gene_expression") # split into training and tesing set
+train = training(split)
+test = testing(split)
+```
+
+```{r}
+#| echo: false
+cv = vfold_cv(train) # 10-fold cross-validation set on the training set
+```
+
+```{r}
+#| echo: false
+recipe = # recipe in workflow
+  recipe(gene_expression ~ ., data = train) |>
+  step_dummy(all_nominal_predictors()) # factor variables
+
+model = # model in workflow
+  linear_reg(penalty = tune(), mixture = 1) |> # lasso regression
+  set_mode("regression") |> 
+  set_engine("glmnet") # engine
+
+wf = workflow(recipe, model)
+```
+
+```{r}
+#| echo: false
+doParallel::registerDoParallel()
+
+grid = grid_regular(penalty(), levels = 50) # a grid of evenly spaced parameter value
+
+tune = tune_grid( # tune parameters on the grid
+  wf, 
+  resamples = cv, 
+  grid = grid
+  )
+```
+
+## Results
+
+The plot below illustrates how the amount of regularisation affects performance metrics. In the initial regions where the metrics are small, RMSE is stable since regularisation does not significantly influence the coefficient estimates. We observe a noticeable decrease in RMSE when the amount of regularisation exceeds about $10^{-2}$. Lower RMSE values indicate a better fit to the data. The optimal amount of regulariwation, which provides the best fit, is found at the lowest point on the RMSE curve.
+
+```{r}
+#| echo: false
+tune |> autoplot() + 
+  labs(
+    title  = "Performance metrics versus amount of regularisation"
+  )
+```
+
+```{r}
+#| echo: false
+penalty = select_best(tune, metric = "rmse") # according to the smallest RMSE
+```
+
+After selecting the best penalty value, which results in the smallest RMSE of approximately `0.037276`, we update the workflow for the best model as follows:
+
+```{r}
+#| echo: false
+wf = wf |> 
+  finalize_workflow(penalty) # use the most suitable parameter
+wf
+```
+
+The VIP plot below shows the most influential variables with importance scores greater than 1. We can see that the cell `gl.xik` has the most positive influence on the model's predictions, while the cell `gl.zhw` has the most negative influence. The treatment `placebo` has the second most negative influence, and the wild-type cell line has the third most negative influence. The importance of other variables is much smaller.
+
+```{r}
+#| echo: false
+fit = wf |> fit(train) # fit on training set
+fit |> # VIP plot
+  extract_fit_parsnip() |> 
+  vip::vi() |> 
+  filter(Importance > 1) |> # 
+  mutate(
+    Variable = str_remove_all(Variable, "tfidf_review_"), 
+    Variable = fct_reorder(Variable, Importance)
+  ) |> 
+  ggplot(aes(Importance, Variable, fill = Sign)) + 
+  geom_col() + 
+  labs(
+    title  = "Variable Importance Plot for variables whose \n importances are larger than 1"
+  ) +
+  theme(
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_text(size = 14),
+    axis.text.x = element_text(size = 12),
+    axis.text.y = element_text(size = 12)
+    )+
+  harrypotter::scale_fill_hp_d("Ravenclaw")
+```
+
+In the following plot, the coefficients of variables are regularised towards zero as the penalty increases:
+
+```{r}
+#| echo: false
+fit |> extract_fit_engine() |> autoplot() +
+  labs(
+    title = "Coefficients are regularised towards zero as the penalty goes up"
+  ) +
+  theme_minimal() +  # apply a minimal theme
+  theme(
+    axis.title.x = element_text(size = 12),
+    axis.title.y = element_text(size = 12),
+    axis.text.x = element_text(size = 10),
+    axis.text.y = element_text(size = 10),
+    plot.title = element_text(size = 14)
+    
+  )
+```
+
+The following table shows the metrics for the fitted best model on the whole dataset, where `rmse = 5.29` and `rsq = 0.780`.
+
+```{r}
+#| echo: false
+last_fit(wf, split) |> collect_metrics()
+```
+
+## Discussion
+
+We fit a predictive model for gene expression using the tuned penalty, and we observe that cell types significantly influence gene expression prediction, particularly the cells `gl.xik`, `gl.zhw`, and `gl.cwn`. The treatment `placebo` and the `wild-type` cell line have a reducing effect on gene expression. Based on our analysis, we can use the cell `gl.xik` to improve gene expression and avoid using the cells `gl.zhw`, `gl.cwn`, the treatment `placebo`, and the `wild-type` cell line.
+
+## Appendix
+
+```{r ref.label=knitr::all_labels()}
+#| eval: false
+#| echo: true
+```
