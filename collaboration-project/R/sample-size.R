@@ -1,3 +1,4 @@
+pacman::p_load(pwr)
 # arguments
 r2 = 0.1
 f2 = r2 / (1 - r2)
@@ -8,6 +9,6 @@ sig.level = 0.05
 # Calculate the sample size
 result = pwr.f2.test(u = u, f2 = f2, sig.level = sig.level, power = power)
 
-# Calculate total sample size
+# Calculate total sample size - 154
 N = result$v + u + 1
 N
